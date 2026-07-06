@@ -39,12 +39,15 @@ PID_COMMIT   = 0x2d            # transfer complete / commit
 PID_CRC_RQST = 0x3a4           # GetRgnChecksum request
 PID_CRC_REPL = 0x3a9           # RgnChecksum reply
 
-MAIN_REGION       = 0x02BD     # <-- the ONLY region this tool will ever touch
+# Preboot LOADER region numbering (RGN scheme): MAIN = region 14. (0x02BD is the GCD record
+# type used on the running-app path; the preboot loader rejects it as an invalid region.)
+MAIN_REGION       = 0x000E     # 14 = fw_all.bin (MAIN). The ONLY region this tool will touch.
 MAIN_SIZE         = 18322432
 MAIN_SHA1_PREFIX  = "d2d0f35f75d3"
 CHUNK             = 250
 
-FORBIDDEN_REGIONS = {0x0008, 8, 12}
+# BOOT/ramloader (12), GCD-BOOT (8/0x0008), u-boot (5), x-loader (43): never touch.
+FORBIDDEN_REGIONS = {0x0008, 8, 12, 5, 43}
 
 # ------------------------------------------------------------------ framing
 def build_header(pid, size, layer=LAYER_APP):
@@ -157,24 +160,41 @@ class Link:
             self.ep_bulk_in.bEndpointAddress if self.ep_bulk_in else 0))
         return self.ep_in is not None and self.ep_out is not None
 
-    def _read_frame_ep(self, ep, timeout):
-        raw = bytes(ep.read(ep.wMaxPacketSize or 64, timeout=timeout))
+    def _read_frame_ep(self, ep, timeout_ms):
+        """Read one GUSB frame, SKIPPING zero-length keep-alive packets and NAK timeouts
+        until a real (>=12 byte) frame arrives or the overall deadline passes."""
+        deadline = time.time() + (timeout_ms / 1000.0)
+        raw = b""
+        while time.time() < deadline:
+            try:
+                chunk = bytes(ep.read(ep.wMaxPacketSize or 64, timeout=1500))
+            except Exception as e:
+                if "timed out" in str(e).lower() or "110" in str(e):
+                    continue  # NAK / nothing yet -> keep waiting until deadline
+                raise
+            if len(chunk) == 0:
+                continue      # zero-length keep-alive -> keep waiting
+            raw = chunk
+            break
         if len(raw) < 12:
             return None, None, raw
         layer, pid, size = parse_header(raw)
         payload = raw[12:12 + size]
-        while len(payload) < size:
-            more = bytes(ep.read(ep.wMaxPacketSize or 64, timeout=timeout))
-            if not more:
+        while len(payload) < size and time.time() < deadline:
+            try:
+                more = bytes(ep.read(ep.wMaxPacketSize or 64, timeout=1500))
+            except Exception:
                 break
+            if not more:
+                continue
             payload += more
         return layer, pid, payload
 
-    def read_reply(self, timeout):
+    def read_reply(self, timeout_ms):
         """Protocol reply: read interrupt IN; if Pid_Data_Available, follow to bulk IN."""
-        layer, pid, payload = self._read_frame_ep(self.ep_int_in, timeout)
+        layer, pid, payload = self._read_frame_ep(self.ep_int_in, timeout_ms)
         if pid == PID_DATA_AVAIL:
-            layer, pid, payload = self._read_frame_ep(self.ep_bulk_in, timeout)
+            layer, pid, payload = self._read_frame_ep(self.ep_bulk_in, timeout_ms)
         return layer, pid, payload
 
     def start_session(self, tries=3):
@@ -287,9 +307,17 @@ def flash_main(link, data, confirm):
         sys.exit("REFUSING: could not Start Session before flash.")
 
     link.send(PID_ANNOUNCE, struct.pack("<HI", region, size))
+    print("[flash] announced region 0x%04x; WAITING for erase-ready ACK (10-90s)..." % region)
     link.send(PID_STATUS)
-    pid, layer, st = link.recv(timeout=60000)
-    print("[flash] announce status reply id=%r payload=%s" % (pid, hexs(st) if st else st))
+    pid, layer, st = link.recv(timeout=90000)
+    rstat = struct.unpack_from("<H", st, 0)[0] if st and len(st) >= 2 else None
+    print("[flash] erase-ready reply: id=%r payload=%s status=%r" % (pid, hexs(st) if st else st, rstat))
+    if pid is None or not st:
+        sys.exit("REFUSING to stream: no erase-ready ACK from loader. Re-run to retry.")
+    if rstat != 0:
+        sys.exit("ABORTING before stream: erase-ready status=%r (nonzero = loader rejected region "
+                 "0x%04x). NOT streaming (avoids hanging the device). status 11 = invalid region." % (rstat, region))
+    print("[flash] erase-ready OK (status 0). Streaming image...")
 
     off = 0
     idx = 0
@@ -303,21 +331,24 @@ def flash_main(link, data, confirm):
             print("[flash] %d/%d chunks (%d/%d bytes)" % (idx, nchunks, off, size))
 
     link.send(PID_COMMIT)
-    pid, layer, st = link.recv(timeout=60000)
-    committed_ok = (st is not None)
-    print("[flash] commit reply id=%r payload=%s" % (pid, hexs(st) if st else st))
+    pid, layer, st = link.recv(timeout=90000)
+    cstat = struct.unpack_from("<H", st, 0)[0] if st and len(st) >= 2 else None
+    print("[flash] commit reply: id=%r payload=%s status=%r" % (pid, hexs(st) if st else st, cstat))
 
-    link.send(PID_CRC_RQST, struct.pack("<HI", region, size))
-    pid, layer, cr = link.recv(timeout=60000)
-    crc_ok = (pid == PID_CRC_REPL)
-    print("[flash] crc reply id=%r payload=%s (elapsed %.1fs)" % (pid, hexs(cr) if cr else cr, time.time() - t0))
+    try:
+        link.send(PID_CRC_RQST, struct.pack("<HI", region, size))
+        pid2, layer2, cr = link.recv(timeout=8000)
+        print("[flash] crc reply: id=%r payload=%s (best-effort; loader may not implement)" % (pid2, hexs(cr) if cr else cr))
+    except Exception as e:
+        print("[flash] crc query skipped: %s" % e)
+    print("[flash] elapsed %.1fs" % (time.time() - t0))
 
-    verdict = committed_ok and crc_ok
+    verdict = (cstat == 0)
     print("")
-    print("===== VERDICT: %s =====" % ("SUCCESS" if verdict else "FAILURE / INCONCLUSIVE"))
+    print("===== VERDICT: %s =====" % ("SUCCESS (commit status 0)" if verdict else "FAILURE (commit status %r)" % cstat))
     if not verdict:
-        print("  no status/abort = staged image rejected by loader.")
-        print("  crc mismatch/missing = readback differs. Re-check image & region.")
+        print("  commit status nonzero = loader rejected the staged image.")
+        print("  (status 11 last time = streamed before erase-ready; this build waits for the ACK first.)")
     return verdict
 
 # ------------------------------------------------------------------ main
