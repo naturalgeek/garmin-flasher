@@ -308,7 +308,7 @@ def flash_main(link, data, confirm):
 
     link.send(PID_ANNOUNCE, struct.pack("<HI", region, size))
     print("[flash] announced region 0x%04x; WAITING for erase-ready ACK (10-90s)..." % region)
-    link.send(PID_STATUS)
+    link.send(PID_STATUS, struct.pack("<H", region))
     pid, layer, st = link.recv(timeout=90000)
     rstat = struct.unpack_from("<H", st, 0)[0] if st and len(st) >= 2 else None
     print("[flash] erase-ready reply: id=%r payload=%s status=%r" % (pid, hexs(st) if st else st, rstat))
@@ -324,16 +324,18 @@ def flash_main(link, data, confirm):
     t0 = time.time()
     while off < size:
         chunk = data[off:off + CHUNK]
-        link.ep_out.write(build_frame(PID_DATA, chunk), timeout=5000)
+        body = struct.pack("<I", off) + chunk       # RgnData body = [u32 offset][data] (the fix)
+        link.ep_out.write(build_frame(PID_DATA, body), timeout=5000)
         off += len(chunk)
         idx += 1
         if idx % 5000 == 0 or off >= size:
             print("[flash] %d/%d chunks (%d/%d bytes)" % (idx, nchunks, off, size))
 
-    link.send(PID_COMMIT)
+    link.send(PID_COMMIT, struct.pack("<H", region))   # RgnCmplt body = [u16 region]
+    link.send(PID_STATUS, struct.pack("<H", region))   # poll final status
     pid, layer, st = link.recv(timeout=90000)
     cstat = struct.unpack_from("<H", st, 0)[0] if st and len(st) >= 2 else None
-    print("[flash] commit reply: id=%r payload=%s status=%r" % (pid, hexs(st) if st else st, cstat))
+    print("[flash] commit status: id=%r payload=%s status=%r" % (pid, hexs(st) if st else st, cstat))
 
     try:
         link.send(PID_CRC_RQST, struct.pack("<HI", region, size))
@@ -345,10 +347,14 @@ def flash_main(link, data, confirm):
 
     verdict = (cstat == 0)
     print("")
-    print("===== VERDICT: %s =====" % ("SUCCESS (commit status 0)" if verdict else "FAILURE (commit status %r)" % cstat))
-    if not verdict:
-        print("  commit status nonzero = loader rejected the staged image.")
-        print("  (status 11 last time = streamed before erase-ready; this build waits for the ACK first.)")
+    if verdict:
+        print("===== VERDICT: SUCCESS (commit status 0) =====")
+        print("  The loader accepted the region. It should now AUTO-REBOOT into the new")
+        print("  firmware (you'll see 'Software Loading' on the device) — no battery pull needed.")
+    else:
+        print("===== VERDICT: FAILURE (commit status %r) =====" % cstat)
+        print("  Nonzero = loader rejected the staged image. status 11 = bad data framing")
+        print("  (each 0x24 packet must be [u32 offset][data]) or wrong region.")
     return verdict
 
 # ------------------------------------------------------------------ main

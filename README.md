@@ -100,9 +100,15 @@ interface:
   1. `0x4b` **announce** `{u16 regionId, u32 size}` — declare region `14` and size.
   2. `0x4a` **status** — poll; **wait for status `0`** (region erased / ready) **before
      streaming.** A non-zero status here means the region was rejected → abort.
-  3. `0x24` **data** — stream the image in **250-byte** chunks (sent raw; no per-chunk
-     offset prefix is needed — the loader positions sequentially).
-  4. `0x2d` **commit** — signal transfer complete; read the status.
+  3. `0x24` **data** — stream the image in **250-byte** chunks. **Each packet body is
+     `[u32 offset_LE][data]`** where `offset` is the running byte position in the region
+     (starts at 0, increments by the chunk length). **Omitting this 4-byte offset prefix
+     corrupts the staged image** — the loader reads your first 4 data bytes as the write
+     address — and the commit is rejected with **status 11** ("unable to program region").
+  4. `0x2d` **commit** `{u16 region}` — signal transfer complete; then poll `0x4a`
+     `{u16 region}` and expect **status 0**. On a status-0 commit the **loader reboots
+     itself into the new firmware** (no host reboot packet exists; it auto-restarts on a
+     clean completion).
 
 ## Requirements
 
@@ -193,36 +199,42 @@ re-verifies this (plus the SHA-1 prefix) before writing.
    ```
 
    The tool re-opens the session, sends the `0x4b` announce for region `14`, **waits for
-   the erase-ready status `0`**, streams all `0x24` data chunks, sends the `0x2d`
-   commit, and reads the status.
+   the erase-ready status `0`**, streams all `0x24` data chunks (each with its offset
+   prefix), sends the `0x2d` commit, and polls the final status.
 
-   > **Note on the commit status and the CRC step.** On the 276Cx the `0x2d` commit
-   > reply may report a **non-zero status (`11`)**, and the follow-up `GetRgnChecksum`
-   > (`0x3a4`) verify command is **not implemented by the loader** and simply times out.
-   > Both are **benign** on this model — the region write still succeeds. Success is
-   > judged by (a) the erase-ready status being `0`, (b) the full data stream
-   > completing, and (c) **the device booting normally afterward** (it shows
-   > "Software Loading" and comes up). Do **not** interrupt the device while it writes.
+   > **Commit status.** A correct flash returns commit **status `0`** — the loader
+   > accepted the region and will **reboot itself** into the new firmware. A **status
+   > `11`** means the staged image was rejected (almost always a malformed `0x24` data
+   > frame — missing the `[u32 offset]` prefix — or a wrong region id). The follow-up
+   > `GetRgnChecksum` (`0x3a4`) verify command is **not implemented by this loader** and
+   > simply times out; that specific timeout is benign. Do **not** interrupt the device
+   > while it writes.
 
-4. **Reboot into the new firmware.** After a successful flash the device should be
-   restarted. If the power button is unresponsive in the loader, briefly remove the
-   battery and power on normally. (See "Auto-reset" below — a protocol reboot is being
-   added so this becomes hands-free.) On boot it shows **"Software Loading"** and comes
-   up on the normal firmware.
+4. **Device auto-reboots.** On a clean status-0 commit the loader restarts on its own —
+   you'll see **"Software Loading"** and it comes up on the new firmware. **No battery
+   pull needed.** (If a flash was *rejected* — status 11 — the loader may sit at
+   "loading loader"; power-cycle, fix the framing/region, and retry.)
 
-## Field notes (the exact sequence that recovered a 276Cx)
+## Field notes
+
+Recovery flow with this (fixed) tool:
 
 1. Device bricked → only enters preboot (`091e:0003`), stable.
 2. `install_udev.sh` (once) so pyusb can open the device as a normal user.
 3. Enter preboot; `python flash_main.py` → `Session Started` + product data (confirms
    comms and the right device).
 4. `python flash_main.py --CONFIRM-FLASH` → announce region `14` → **erase-ready
-   status `0`** → stream 18 MB (~73k chunks) → commit (status `11`, benign).
-5. Power-cycle → device shows **"Software Loading"**, loads the firmware, boots normally.
+   status `0`** → stream 18 MB (~73k `0x24` packets, each `[u32 offset][250 data]`) →
+   commit → **status `0`**.
+5. **Device auto-reboots** → shows **"Software Loading"**, loads the firmware, boots normally.
 
-Gotchas we hit (all fixed in this tool): announcing `0x02BD` instead of `14` (rejected,
-status `11`); reading replies from bulk IN instead of interrupt IN (`0x82`); mistaking a
-zero-length interrupt keep-alive for the erase-ready reply and streaming too early.
+Four bugs were fixed while developing this against a real 276Cx (each cost a flash
+attempt): announcing GCD type `0x02BD` instead of loader region `14` (rejected, status
+`11`); reading replies from bulk IN instead of interrupt IN (`0x82`); mistaking a
+zero-length interrupt keep-alive for the erase-ready reply (streaming before erase); and
+**sending `0x24` data without the `[u32 offset]` prefix** (loader scrambles the image →
+commit rejected with status `11` → device hangs at "loading loader" and never
+auto-reboots). All four are handled in the current code.
 
 ## Recovery / entry mode
 
