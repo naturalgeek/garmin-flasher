@@ -1,0 +1,10 @@
+# Never commit firmware binaries or images (copyrighted Garmin material)
+*.bin
+*.gcd
+*.rgn
+*.img
+
+# Python
+.venv/
+__pycache__/
+*.pyc
