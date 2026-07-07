@@ -323,6 +323,26 @@ def do_flash(link, region, data):
     print("  power on normally (no keys). It should boot straight into the new firmware.")
     return True
 
+# ------------------------------------------------------------------ erase-only (destructive test)
+def do_erase(link, region, size):
+    assert_main_only(region)
+    if not link.start_session():
+        sys.exit("REFUSING: could not Start Session before erase.")
+    print("[erase] announcing region 0x%04x with size %d -- this ERASES the region..." % (region, size))
+    link.send(PID_ANNOUNCE, struct.pack("<HI", region, size))
+    link.send(PID_STATUS, struct.pack("<H", region))
+    pid, layer, st = link.recv(timeout=90000)
+    rstat = struct.unpack_from("<H", st, 0)[0] if st and len(st) >= 2 else None
+    print("[erase] erase-ready status: id=%r status=%r" % (pid, rstat))
+    if pid is None or rstat != 0:
+        sys.exit("erase NOT confirmed (status=%r). Region may be unchanged." % rstat)
+    print("")
+    print("===== MAIN REGION 0x%04x ERASED (no data written) =====" % region)
+    print("  The device will NOT boot now -- expect 'Missing System Software' / no boot.")
+    print("  This is the intended test state. RECOVER by re-entering preboot and running:")
+    print("      python flash_main.py --CONFIRM-FLASH")
+    return True
+
 # ------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(description="Garmin MAIN-region USB recovery flasher (read-only by default)")
@@ -334,6 +354,9 @@ def main():
                     help="permit flashing a HWID with no built-in profile (region 14, generic checks only)")
     ap.add_argument("--skip-image-hash", action="store_true",
                     help="skip the known-image SHA-1 match (still enforces size + checksum)")
+    ap.add_argument("--ERASE-ONLY", dest="erase_only", action="store_true",
+                    help="DESTRUCTIVE TEST: erase the MAIN region and stop (no write). The device "
+                         "will NOT boot until re-flashed. Requires --CONFIRM-FLASH too.")
     args = ap.parse_args()
 
     print("=== Garmin MAIN recovery flasher ===")
@@ -370,6 +393,16 @@ def main():
         else:
             region = MAIN_REGION_DEFAULT
             print("[device] HWID %r has NO built-in profile. MAIN=region 14 assumed (UNCONFIRMED for this model)." % hwid)
+
+        # erase-only destructive test (no image needed)
+        if args.erase_only:
+            if not args.confirm:
+                sys.exit("REFUSING: --ERASE-ONLY is destructive; also pass --CONFIRM-FLASH.")
+            size = profile["main_size"] if profile else None
+            if size is None:
+                sys.exit("--ERASE-ONLY needs a known device profile for the region size (HWID %r unknown)." % hwid)
+            do_erase(link, region, size)
+            return
 
         # verify image
         data, problems = load_and_check_image(args.image, profile, args.skip_image_hash)
