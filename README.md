@@ -201,6 +201,26 @@ unencrypted Garmin handhelds — but **only the 276Cx is verified.** To try anot
 Out of scope: encrypted firmware (Fenix 5+/MARQ) and Android/Linux-based Garmin devices —
 this approach does not apply.
 
+## bootloader-cli — advanced raw console (DANGEROUS)
+
+`bootloader_cli.py` is an interactive console over the same GUSB primitives, for manual
+low-level work. It **requires `--i-accept-the-risk` to start** and auto-elevates via sudo like
+the flasher:
+
+```bash
+python bootloader_cli.py --i-accept-the-risk
+```
+
+Commands (in the `gbl>` prompt): `session`, `product`, `regions`, `status <region>`,
+`announce <region> <size>` (⚠ erases), `data <offset> <hex|@file>`, `write <region> <file>`
+(full announce→stream→commit), `commit <region>`, `checksum <region> <size>`,
+`send <layer> <id> [hex]` (arbitrary packet), `recv [ms]`, `reset`, `help`, `quit`.
+
+> **Danger:** this bypasses the flasher's MAIN-only guard. Announcing/erasing/writing regions
+> **5 (u-boot)** or **43 (x-loader)** is a **permanent brick**; **12** is BOOT (recovery escape
+> hatch). Those require an extra typed confirmation. Note the loader itself refuses writes to
+> protected regions (announce returns status ≠ 0), but do not rely on that. MAIN = region 14.
+
 ## Field notes (the sequence that recovered a 276Cx)
 
 1. Device bricked → only enters preboot (`091e:0003`), stable.
