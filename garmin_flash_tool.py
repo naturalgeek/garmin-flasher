@@ -529,9 +529,8 @@ def main():
                         help="DESTRUCTIVE TEST: erase MAIN and stop (device won't boot until re-flashed)")
     action.add_argument("--cli", action="store_true",
                         help="open the RAW bootloader console (DANGEROUS; requires --i-accept-the-risk)")
-    # flash source (either)
-    ap.add_argument("--image", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "main_0x02BD.bin"),
-                    help="raw MAIN-region image for --flash-main (default: ./main_0x02BD.bin)")
+    # flash source (exactly one required for --flash-main; no default)
+    ap.add_argument("--image", help="raw MAIN-region image for --flash-main (mutually exclusive with --gcd)")
     ap.add_argument("--gcd", help="a full .gcd for --flash-main; the MAIN region (0x02BD) is extracted from it")
     # modifiers
     ap.add_argument("--allow-unknown-device", action="store_true",
@@ -556,6 +555,14 @@ def main():
         sys.exit("REFUSING: --cli opens a RAW bootloader console that can PERMANENTLY brick the\n"
                  "device (erasing region 5/43 is unrecoverable; region 12 is BOOT). Re-run with:\n"
                  "    sudo %s %s --i-accept-the-risk" % (sys.executable, " ".join(sys.argv)))
+
+    # --image and --gcd are mutually exclusive, and exactly one is REQUIRED to flash.
+    if args.image and args.gcd:
+        sys.exit("REFUSING: pass EITHER --image OR --gcd, not both.")
+    if args.flash_main and not (args.image or args.gcd):
+        sys.exit("REFUSING: --flash-main needs a flash source. Pass one (no default):\n"
+                 "    --gcd FILE.gcd     (extract the MAIN region from a full .gcd), or\n"
+                 "    --image main.bin   (a raw MAIN-region image)")
 
     print("=== garmin-flash-tool ===")
     action_name = ("cli (RAW CONSOLE)" if args.cli else "flash-main (WRITE)" if args.flash_main
@@ -601,13 +608,17 @@ def main():
             do_erase(link, region, size)
             return
 
-        data, problems = load_flash_source(args, profile)
-        for p in problems:
-            print("[image] PROBLEM: %s" % p)
+        data, problems = (None, [])
+        if args.image or args.gcd:
+            data, problems = load_flash_source(args, profile)
+            for p in problems:
+                print("[image] PROBLEM: %s" % p)
 
         if not args.flash_main:   # info / default (read-only)
             if data is not None:
                 dry_run_plan(region, len(data))
+            else:
+                print("[info] no flash source given (--gcd/--image) — skipping dry-run plan.")
             print("[info] comms OK. Read-only — no data written.")
             print("[info] to flash: sudo python garmin_flash_tool.py --flash-main --gcd <stock.gcd>"
                   + ("" if profile else " --allow-unknown-device"))
