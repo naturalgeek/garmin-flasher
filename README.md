@@ -55,7 +55,7 @@ as an invalid region (status `11`). The tool uses region **14**.
 
 - **Read-only by default.** With no arguments, `garmin_flash_tool.py` opens the device, runs a
   read-only self-test (Start Session + product query), prints the detected model and a
-  dry-run plan, and **sends no write or erase frames.** Only `--CONFIRM-FLASH` writes.
+  dry-run plan, and **sends no write or erase frames.** Only `--flash-main` writes.
 - **MAIN only.** The write path aborts unless the region id is exactly `14`, and rejects
   the BOOT-class ids above.
 - **Auto-detects the device** via the product-request reply (HWID + firmware version)
@@ -128,8 +128,8 @@ the same manual restart.
 - **Linux**, **Python 3**, **`pyusb`** (`pip install -r requirements.txt`) + **libusb-1.0**
   (`sudo apt install libusb-1.0-0`).
 - **Run as root** — raw USB access requires it, so start the flasher with **`sudo`** (or as
-  root). It refuses to touch the device otherwise. (`--backup-userdata` is the exception: it
-  only reads the mounted mass-storage volume, so it needs no root.)
+  root). It refuses to touch the device otherwise. (
+  )
 
 ## Preparing the MAIN image (you supply it)
 
