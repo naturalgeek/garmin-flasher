@@ -152,9 +152,10 @@ For the 276Cx the result must be **18322432 bytes** with `sum(bytes) % 256 == 0`
 
 ## Usage
 
-1. **Enter preboot**: power off, connect USB, **hold D-pad `Up`** until loader mode. The
-   `091e:0003` interface is live ~33 s for first contact (it stays up once the tool is
-   talking to it).
+1. **Enter preboot**: power off, connect USB, **hold D-pad `Up`** until loader mode. **You can
+   start the tool first — it waits (polls) for the device to appear** and continues the instant
+   it does (`Ctrl-C` to cancel, or `--wait-timeout SEC` to bound the wait). The `091e:0003`
+   interface is live ~33 s per attempt; the wait loop just re-catches it, so timing is relaxed.
 
 2. **Read-only self-test** (safe):
 

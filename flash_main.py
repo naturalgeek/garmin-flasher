@@ -162,6 +162,24 @@ class Link:
             self.ep_bulk_in.bEndpointAddress if self.ep_bulk_in else 0))
         return self.ep_in is not None and self.ep_out is not None
 
+    def wait_open(self, timeout=0):
+        """Poll for the preboot device (091e:0003) until it appears, then open it.
+        timeout <= 0 waits indefinitely (Ctrl-C to abort)."""
+        t0 = time.time()
+        last = 0.0
+        while True:
+            if self.usb.find(idVendor=VID, idProduct=PID_PREBOOT) is not None:
+                print("[wait] device present at 091e:0003 — opening.")
+                return self.open()
+            now = time.time()
+            if now - last > 10:
+                print("[wait] waiting for device at 091e:0003 — enter preboot: power off, "
+                      "connect USB, hold D-pad Up ... (%ds)" % int(now - t0))
+                last = now
+            if timeout > 0 and (now - t0) >= timeout:
+                return False
+            time.sleep(0.5)
+
     def _read_frame_ep(self, ep, timeout_ms):
         """Read one GUSB frame, skipping zero-length keep-alives / NAK timeouts until a
         real (>=12 byte) frame arrives or the deadline passes."""
@@ -359,6 +377,8 @@ def main():
                          "will NOT boot until re-flashed. Requires --CONFIRM-FLASH too.")
     ap.add_argument("--no-sudo", action="store_true",
                     help="do NOT auto-elevate via sudo (use if you installed the udev rule or run as root)")
+    ap.add_argument("--wait-timeout", type=int, default=0, metavar="SEC",
+                    help="seconds to wait for the device in preboot (0 = wait forever, default)")
     args = ap.parse_args()
 
     # Raw USB access needs root OR a udev rule. To work WITHOUT a udev rule, auto-elevate via
@@ -369,28 +389,27 @@ def main():
         try:
             os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
         except Exception as e:
-            print("[perm] sudo re-exec failed (%s); continuing as current user "
-                  "(will need a udev rule or it'll fail to open the device)." % e)
+            # sudo binary not found / could not exec -> abort, do NOT limp on as non-root.
+            sys.exit("[perm] FATAL: could not elevate via sudo (%s). Run as root, or install the "
+                     "udev rule and pass --no-sudo. Exiting." % e)
 
     print("=== Garmin MAIN recovery flasher ===")
     print("mode: %s" % ("LIVE FLASH (--CONFIRM-FLASH)" if args.confirm else "READ-ONLY / DRY-RUN"))
 
-    # open device (must be in preboot 091e:0003)
+    # wait for the device to appear in preboot (091e:0003), then open it
     try:
         link = Link()
     except Exception as e:
         sys.exit("[usb] pyusb unavailable: %s" % e)
     try:
-        opened = link.open()
+        opened = link.wait_open(args.wait_timeout)
+    except KeyboardInterrupt:
+        sys.exit("\n[wait] cancelled.")
     except Exception as e:
         opened = False
         print("[usb] open failed: %s" % e)
     if not opened:
-        print("\n[device] not in preboot (091e:0003) or not openable.")
-        print("  Enter preboot: power off, connect USB, hold D-pad Up until loader mode, then re-run.")
-        if args.confirm:
-            sys.exit("REFUSING: --CONFIRM-FLASH but device not present at 091e:0003.")
-        return
+        sys.exit("[device] not found at 091e:0003 within %ds." % args.wait_timeout)
 
     try:
         # comms + identify

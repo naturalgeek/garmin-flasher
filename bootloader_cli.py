@@ -187,6 +187,8 @@ def main():
     ap.add_argument("--i-accept-the-risk", dest="accept", action="store_true",
                     help="REQUIRED to start; you acknowledge this can permanently brick the device")
     ap.add_argument("--no-sudo", action="store_true", help="do not auto-elevate via sudo")
+    ap.add_argument("--wait-timeout", type=int, default=0, metavar="SEC",
+                    help="seconds to wait for the device in preboot (0 = wait forever, default)")
     args = ap.parse_args()
 
     if not args.accept:
@@ -200,7 +202,8 @@ def main():
         try:
             os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
         except Exception as e:
-            print("[perm] sudo re-exec failed (%s); continuing as current user." % e)
+            sys.exit("[perm] FATAL: could not elevate via sudo (%s). Run as root, or install the "
+                     "udev rule and pass --no-sudo. Exiting." % e)
 
     print("=== Garmin preboot bootloader console ===")
     print("!!! DANGER: raw loader access. Erasing region 5/43 = PERMANENT brick; never flash 12=BOOT.")
@@ -208,9 +211,12 @@ def main():
         link = fm.Link()
     except Exception as e:
         sys.exit("pyusb unavailable: %s" % e)
-    if not link.open():
-        sys.exit("device not found at 091e:0003 -- enter preboot (power off, connect USB, hold "
-                 "D-pad Up) and retry.")
+    try:
+        ok = link.wait_open(args.wait_timeout)
+    except KeyboardInterrupt:
+        sys.exit("\n[wait] cancelled.")
+    if not ok:
+        sys.exit("device not found at 091e:0003 within %ds." % args.wait_timeout)
     try:
         repl(link)
     finally:
